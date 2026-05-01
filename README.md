@@ -1,4 +1,4 @@
-# DoctrineRAG
+# DoctrineRAG with API
 
 교리·교범류 문서를 업로드하고, **검색 증강 생성(RAG)**으로 근거 기반 답변을 제공하는 발표/데모용 풀스택 MVP입니다. 기본 LLM·임베딩은 **OpenAI API**이며, 벡터 저장은 로컬 **ChromaDB(영속)** 입니다.
 
