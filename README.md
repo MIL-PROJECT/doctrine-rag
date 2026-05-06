@@ -1,158 +1,233 @@
-# DoctrineRAG with API
+# DoctrineRAG · Ollama
 
-교리·교범류 문서를 업로드하고, **검색 증강 생성(RAG)**으로 근거 기반 답변을 제공하는 발표/데모용 풀스택 MVP입니다. 기본 LLM·임베딩은 **OpenAI API**이며, 벡터 저장은 로컬 **ChromaDB(영속)** 입니다.
+교리·참고 문서를 **사전에** `backend/data/doctrine/`에 두고, **로컬 임베딩(SentenceTransformers) + ChromaDB + Ollama**로 질의응답하는 RAG 데모입니다. **OpenAI API·키·의존성은 사용하지 않습니다.**
 
-## 프로토타입 UI (초안)
+## 프로젝트 개요
 
-문서 업로드 → 질문하기 흐름의 현재 웹 초안 화면입니다.
+| 구분 | 기술 |
+|------|------|
+| 프론트 | Next.js 14 |
+| API | FastAPI |
+| 벡터 DB | ChromaDB (영속 볼륨) |
+| 임베딩 | `paraphrase-multilingual-MiniLM-L12-v2` (로컬) |
+| LLM | Ollama `qwen2.5:3b` (`/api/chat`) |
+| 실행 | Docker Compose (`ollama`, `ollama-init`, `backend`, `frontend`) |
 
-![DoctrineRAG 웹 UI — 문서 업로드 및 질문하기](docs/prototype-ui.png)
+사용자는 **문서를 업로드하지 않습니다.** 운영/배포 전에 PDF·TXT를 `backend/data/doctrine/`에 넣어 두고, 백엔드 기동 시 자동 인제스트됩니다.
 
-## 아키텍처 (요약)
+## 아키텍처
 
 ```text
-[Browser]
-   │  POST /upload (multipart)     POST /chat (JSON)     DELETE /reset
-   ▼
-[Next.js :3000]  ──NEXT_PUBLIC_API_URL──►  [FastAPI :8000]
-                                              │
-                    ┌─────────────────────────┼─────────────────────────┐
-                    ▼                         ▼                         ▼
-              document_loader            RAGPipeline              health/ready
-              (PDF/TXT)                  orchestration
-                    │                         │
-                    ▼                         ├── Embedder (OpenAI, 배치)
-              chunker                         ├── VectorStore (Chroma)
-              (문단 인지 윈도우)               ├── rerank (다양성, Jaccard)
-                    │                         └── LLM (OpenAI Chat)
-                    ▼
-              chroma_db/   uploads/
+[Browser] ──► Next.js :3000
+                  │
+                  ▼ POST /chat
+            FastAPI :8000
+                  │
+     ┌────────────┼────────────┐
+     ▼            ▼            ▼
+data/doctrine   Chroma      Ollama :11434
+ (시작 시       (벡터)       (qwen2.5:3b)
+  인제스트)
+     │
+     ▼
+SentenceTransformers
+ (질문·청크 임베딩)
 ```
 
-**설계 의도**
+## RAG 동작
 
-- **포트/어댑터**: `VectorStore`, `Embedder`, `LLMClient`(Protocol)로 저장소·임베딩·LLM 교체 가능.
-- **오케스트레이션 단일 진입점**: `rag/pipeline.py`의 `RAGPipeline`이 인제스트·질의를 묶음.
-- **관측**: JSON 라인 로그, `/health/live`, `/health/ready`(벡터 스토어 카운트).
+1. **기동 시** (`chroma_db/.ingested` 없을 때만): `data/doctrine/*.pdf|*.txt` 로드 → 청킹 → 로컬 임베딩 → Chroma 저장 → `.ingested` 생성  
+2. **이후 기동**: `.ingested`가 있으면 인제스트 생략  
+3. **질의**: 질문 임베딩 → Chroma 상위 `top_k` 검색 → 컨텍스트 구성 → Ollama 채팅 → 답변 + 출처
 
-## 기능
+## OpenAI 대신 Ollama를 쓰는 방식
 
-- PDF/TXT 업로드 → 텍스트 추출 → 청킹 → **배치 임베딩** → Chroma 저장
-- 질의 임베딩 → **넓은 풀 검색**(`top_k × RETRIEVAL_POOL_MULTIPLIER`) → **중복 완화 재정렬** → 컨텍스트 구성 → Chat 완성
-- 출처(파일명, 청크 인덱스, 거리, 미리보기) 반환
-- 벡터 컬렉션 초기화(`DELETE /reset`)
+| 역할 | OpenAI 버전 | 이 저장소 |
+|------|-------------|-----------|
+| 임베딩 | `embeddings.create` | SentenceTransformers (Hugging Face 캐시) |
+| 생성 | Chat Completions | `POST {OLLAMA_BASE_URL}/api/chat`, `stream: false` |
+| 인증 | API 키 | 없음 (로컬 Ollama) |
 
-## 로컬에서 바로 웹 열기 (권장)
+환경 변수 `OLLAMA_BASE_URL`은 Compose에서 `http://ollama:11434` 로 설정합니다.
 
-**전제:** [Docker Desktop](https://docs.docker.com/desktop/)이 실행 중이고, 프로젝트 루트에 `.env`와 유효한 `OPENAI_API_KEY`가 있어야 합니다.
+## Docker로 실행
 
-| 방법 | 설명 |
-|------|------|
-| **Windows** | 루트의 `Start-Local.cmd` 더블클릭 |
-| **PowerShell** | 루트에서 `.\scripts\start-local.ps1` |
-| **macOS / Linux** | `chmod +x scripts/start-local.sh` 후 `./scripts/start-local.sh` |
-
-스크립트는 `docker compose up --build -d`로 기동한 뒤 **http://localhost:3000** 을 기본 브라우저로 엽니다. `.env`가 없으면 `.env.example`을 복사만 하고 안내합니다. **중지:** `docker compose down`.
-
-**Docker 없이** (Python 3.11+ · Node 20+): `.\scripts\start-local-native.ps1` — 백엔드·프론트가 새 PowerShell 창에서 각각 실행됩니다.
-
-## 빠른 시작 (Docker)
-
-루트에 `.env`를 두고 `OPENAI_API_KEY`를 설정합니다. 예시는 `.env.example` 참고.
-
-백그라운드 기동:
+**요구:** Docker Desktop, 충분한 디스크(RAM 권장 8GB+, 첫 빌드·모델 다운로드에 시간 소요).
 
 ```bash
-docker compose up --build -d
-```
-
-포그라운드(로그를 터미널에 붙여 두기):
-
-```bash
+cd doctrine-rag-ollama
 docker compose up --build
 ```
 
 접속:
 
-- 프론트: http://localhost:3000  
+- UI: http://localhost:3000  
 - API: http://localhost:8000  
-- Swagger: http://localhost:8000/docs  
+- 헬스: http://localhost:8000/health  
+- Ollama(호스트 디버깅): http://localhost:11434  
 
-프론트는 브라우저에서 백엔드로 직접 호출하므로, **데모 환경**에서는 `NEXT_PUBLIC_API_URL=http://localhost:8000`이 일반적입니다. 다른 호스트에 배포할 때는 **프론트 이미지 빌드 시점**에 해당 공개 API URL을 넘겨야 합니다(`docker-compose.yml`의 `frontend.build.args`).
+### 첫 실행 시 주의 (시간이 오래 걸릴 수 있음)
+
+1. **`ollama-init`**: `qwen2.5:3b` pull (네트워크·용량에 따라 수 분~십 수 분).  
+2. **백엔드 기동**: Hugging Face에서 임베딩 모델을 받아 캐시 볼륨에 저장(최초 1회 크고 느릴 수 있음).  
+3. **인제스트**: 문서량에 따라 추가 시간.  
+4. 프론트는 백엔드 **헬스체크 통과 후** 기동합니다. `start_period`를 길게 두었으나, 여전히 **로그를 보며** 기다리는 것이 안전합니다.
+
+```bash
+docker compose logs -f backend ollama-init
+```
+
+## API
+
+### `GET /health`
+
+상태, Chroma 문서 수, Ollama 연결 여부, 인제스트 플래그 등.
+
+### `POST /chat`
+
+요청:
+
+```json
+{
+  "question": "방어작전에서 예비대의 역할은 무엇인가?",
+  "top_k": 5
+}
+```
+
+응답:
+
+```json
+{
+  "answer": "...",
+  "sources": [
+    {
+      "source": "sample_doctrine.txt",
+      "chunk_index": 0,
+      "distance": 0.123,
+      "preview": "..."
+    }
+  ]
+}
+```
+
+### `DELETE /reset`
+
+Chroma 초기화, `.ingested` 삭제 후 **동일 데이터 디렉터리에서 재인제스트** (관리/개발용).
+
+**공개 `POST /upload`는 없습니다.**
+
+## 데모 질문 예시
+
+- 방어작전의 목적은 무엇인가?  
+- 예비대는 어떤 상황에서 운용되는가?  
+- 지휘관 판단 시 고려 요소는?  
+- RAG가 환각을 줄이는 이유는?
+
+(기본 `backend/data/doctrine/sample_doctrine.txt` 기준)
+
+## 교리 데이터 넣는 법
+
+1. 호스트에서 `backend/data/doctrine/` 에 `.pdf` / `.txt` 추가  
+2. 이미 `.ingested`가 있는 볼륨이면: `docker compose down` 후 볼륨 삭제 **또는** `DELETE /reset` 호출  
+3. 백엔드 재시작 후 인제스트 반영
+
+## 트러블슈팅
+
+| 증상 | 점검 |
+|------|------|
+| 프론트가 안 뜸 | `docker compose logs backend` — 임베딩 다운로드·인제스트 대기 중일 수 있음 |
+| `502` / Ollama 오류 | `ollama-init` 성공 여부, `docker compose logs ollama-init`. 호스트에서 `curl http://localhost:11434/api/tags` |
+| 인덱스 0건 | `data/doctrine` 마운트 경로에 파일이 있는지, PDF가 스캔만 있어 텍스트가 비지 않았는지 |
+| 느리다 | CPU만 사용 시 임베딩·LLM 모두 느림. 더 작은 Ollama 모델·짧은 문서로 테스트 |
+| 디스크 부족 | `docker system prune`, HF/Ollama 볼륨 정리 |
 
 ## 로컬 개발 (선택)
 
-- **Backend**: Python 3.11 가상환경 권장 (`chromadb` 등 바이너리 휠 호환).  
-  `backend`에서 `pip install -r requirements.txt` 후 `uvicorn main:app --reload --host 0.0.0.0 --port 8000`
-- **Frontend**: Node 20+에서 `npm install` / `npm run dev` (또는 Docker 프론트 컨테이너)
+- Backend: `cd backend && pip install -r requirements.txt` 후 Ollama를 호스트에 띄우고 `OLLAMA_BASE_URL=http://127.0.0.1:11434 uvicorn main:app --reload`  
+- Frontend: `cd frontend && npm install && npm run dev`  
+- Docker 없이 쓸 때도 `data/doctrine`·`chroma_db` 경로는 동일하게 유지하세요.
 
-## 환경 변수
+## 디렉터리 구조
 
-| 변수 | 설명 | 기본 |
-|------|------|------|
-| `OPENAI_API_KEY` | OpenAI 키 (필수) | — |
-| `EMBEDDING_MODEL` | 임베딩 모델 | `text-embedding-3-small` |
-| `CHAT_MODEL` | 채팅 모델 | `gpt-4o-mini` |
-| `OPENAI_TIMEOUT_SECONDS` | 클라이언트 타임아웃 | `120` |
-| `EMBEDDING_BATCH_SIZE` | 임베딩 API 배치 분할 크기 | `64` |
-| `MAX_UPLOAD_MB` | 업로드 최대 크기(MB) | `25` |
-| `MAX_QUESTION_LENGTH` | 질문 최대 길이 | `4000` |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | 청크 파라미터 | `900` / `150` |
-| `RETRIEVAL_POOL_MULTIPLIER` | 검색 풀 배수 | `2` |
-| `DIVERSITY_JACCARD_THRESHOLD` | 다양성 재정렬 Jaccard 상한 | `0.55` |
-| `CHAT_TEMPERATURE` | 답변 temperature | `0.2` |
-| `CHROMA_DIR` / `CHROMA_COLLECTION_NAME` | Chroma 경로·컬렉션 | `chroma_db` / `doctrine_collection` |
-| `LOG_LEVEL` | 로그 레벨 | `INFO` |
-| `CORS_ORIGINS` | 허용 Origin(쉼표 구분), `*` 가능 | `*` |
+```text
+doctrine-rag-ollama/
+├─ backend/
+│  ├─ main.py
+│  ├─ config.py
+│  ├─ document_loader.py
+│  ├─ chunker.py
+│  ├─ embeddings.py
+│  ├─ vector_store.py
+│  ├─ llm.py
+│  ├─ rag_service.py
+│  ├─ ingest_seed.py
+│  ├─ requirements.txt
+│  ├─ Dockerfile
+│  ├─ data/doctrine/     # 배포 전 교리 원문
+│  ├─ uploads/
+│  └─ chroma_db/         # 로컬 개발용 (Compose는 볼륨 사용)
+├─ frontend/
+├─ docker-compose.yml
+├─ .env.example
+├─ sample_doctrine.txt   # 루트 샘플(참고용, 인제스트는 backend/data/doctrine)
+└─ README.md
+```
 
-## API 요약
+## 라이선스
 
-| 메서드 | 경로 | 설명 |
-|--------|------|------|
-| `GET` | `/` | 기본 상태 |
-| `GET` | `/health/live` | 프로세스 생존 |
-| `GET` | `/health/ready` | 벡터 스토어 응답성(503 가능) |
-| `POST` | `/upload` | `multipart/form-data` 파일 필드 `file` |
-| `POST` | `/chat` | JSON `{ "question": string, "top_k"?: 1–20 }` |
-| `DELETE` | `/reset` | 컬렉션 재생성 |
+데모·교육용. 문서 내용·배포 환경에 맞게 이용약관·보안을 별도 검토하세요.
 
-에러 응답은 가능한 한 `{ "detail": "...", "code": "..." }` 형태(`AppError` 계열).
 
-## 보안·운영 메모 (MVP 한계 포함)
+## 다른 PC에서 접속하기
 
-- 업로드: 확장자·**최대 크기**·PDF **매직 넘버** 검증.
-- 질문 길이 상한·`top_k` 상한.
-- API 키는 서버 환경변수만 사용; 로그에 키를 남기지 않음.
-- CORS 기본 `*`는 **데모 편의**용. 프로덕션에서는 `CORS_ORIGINS`를 명시할 것.
-- 스캔 PDF는 텍스트 추출 실패 가능 → 사용자 메시지로 안내.
+같은 Wi-Fi/LAN에 있는 다른 PC에서 접속하려면 서버 PC에서 Next.js를 `0.0.0.0`으로 실행해야 합니다.
 
-## 데모 시나리오
+### 1) 서버 PC의 내부 IP 확인
 
-1. `sample_doctrine.txt` 업로드  
-2. 질문 예: 방어작전 목적, 예비대 역할, 지휘관 고려 요소  
-3. 답변의 **근거 번호**와 출처 패널 대조
+Windows PowerShell:
 
-## 앞으로 개선할 부분 (아이디어)
+```bash
+ipconfig
+```
 
-### UI / UX
-- **레이아웃·시각**: 카드 간 여백·타이포·다크 모드, 모바일 대응, 로딩·에러 상태를 스켈레톤/토스트로 명확히 표시.
-- **대화형 UI**: 단발 질문 대신 **채팅 스레드**(이전 맥락 유지), 질문 **추천 칩**, 답변 **복사·재생성** 버튼.
-- **문서 관리**: 업로드 목록·삭제·문서별 구분, 인제스트 진행률(청크 수·소요 시간) 표시.
-- **출처 표시**: 근거 번호와 본문 **하이라이트·페이지 점프**(PDF 페이지 메타가 있을 때), 거리 대신 **유사도 %** 등 직관적 표기.
+`IPv4 주소` 값을 확인합니다. 예: `192.168.0.25`
 
-### RAG 메커니즘·구성
-- **청킹**: 문단·제목 기반 **계층 청크**, 필요 시 임베딩 기반 시맨틱 분할; 표·목록 보존.
-- **검색**: 하이브리드(BM25 + 벡터), 메타데이터 필터(문서·장·절), **크로스 인코더 재순위** 또는 가벼운 LLM rerank.
-- **캐싱**: 동일/유사 질문 **임베딩·응답 캐시**(Redis 등)로 비용·지연 감소.
-- **벡터 DB**: Chroma 외 **Qdrant / PGVector** 등 외부 스토어로 교체·다중 인스턴스 대비.
-- **비동기 인제스트**: 대용량 PDF는 큐·워커로 백그라운드 처리, 업로드 즉시 응답.
+macOS/Linux:
 
-### 문서·입력 범위
-- **포맷 확장**: `.docx`, `.md`, `.html` 등; 스캔 PDF는 **OCR** 파이프라인(선택).
-- **품질**: 빈/손상 파일에 대한 사용자 가이드, 인제스트 전 **미리보기 텍스트** 노출.
+```bash
+ifconfig
+```
 
-### 보안·운영(선택사항항)
-- **인증·테넌트**: 로그인·API 키·조직별 컬렉션 분리.
-- **가드레일**: 레이트 리밋, 업로드 바이러스 스캔(선택), 민감정보 마스킹 정책.
-- **관측**: 요청 추적 ID, OpenTelemetry, 사용량·비용 대시보드.
+### 2) 프론트엔드 실행
 
+```bash
+cd frontend
+npm install
+npm run dev:network
+```
+
+또는 Docker 사용 시:
+
+```bash
+docker compose up --build
+```
+
+### 3) 다른 PC에서 접속
+
+다른 PC의 Edge 주소창에 아래처럼 입력합니다.
+
+```text
+http://서버PC_IP:3000
+```
+
+예시:
+
+```text
+http://192.168.0.25:3000
+```
+
+### 4) 방화벽 허용
+
+접속이 안 되면 서버 PC에서 Windows Defender 방화벽의 인바운드 규칙에 `3000`, 필요 시 `8000` 포트를 허용하세요.
+
+> 프론트엔드는 `/api/*` 프록시를 통해 백엔드에 접근하도록 변경되어, 다른 PC 브라우저가 자신의 `localhost:8000`을 찾는 문제가 발생하지 않습니다.

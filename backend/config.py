@@ -1,82 +1,49 @@
-"""Centralized settings loaded from environment variables."""
+"""Configuration — Ollama + local embeddings only (no OpenAI)."""
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from typing import List
-
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_BACKEND_ROOT = Path(__file__).resolve().parent
+_PROJECT_ROOT = _BACKEND_ROOT.parent
+
 load_dotenv(_PROJECT_ROOT / ".env")
 load_dotenv()
 
+# 디스크 경로(영구 저장). env 값은 상대 경로면 backend 기준으로 해석됩니다.
+_CHROMA_ENV = os.getenv("CHROMA_DIR", "chroma_db").strip() or "chroma_db"
+CHROMA_PATH_DISPLAY = _CHROMA_ENV
+CHROMA_DIR = (_BACKEND_ROOT / _CHROMA_ENV).resolve()
+COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "doctrine_ollama")
+DOCTRINE_DATA_DIR = _BACKEND_ROOT / os.getenv("DOCTRINE_DATA_DIR", "data/doctrine")
+# 구조화 청크(CSV/JSON/JSONL) 디렉터리 — INGEST_MODE=chunks 일 때 사용
+CHUNKS_DATA_DIR = _BACKEND_ROOT / os.getenv("CHUNKS_DATA_DIR", "data/chunks")
+# doctrine: PDF/TXT 자동 청킹 | chunks: CHUNKS_DATA_DIR 만 사용
+_m = os.getenv("INGEST_MODE", "doctrine").strip().lower()
+INGEST_MODE = _m if _m in ("doctrine", "chunks") else "doctrine"
+# 비어 있으면 chunk_text, text, content … 순으로 텍스트 컬럼 자동 탐지
+CHUNK_TEXT_COLUMN = os.getenv("CHUNK_TEXT_COLUMN", "").strip() or None
 
-def _split_origins(raw: str) -> List[str]:
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
-    return parts if parts else ["*"]
+INGEST_FLAG_PATH = CHROMA_DIR / ".ingested"
 
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
 
-@dataclass(frozen=True)
-class Settings:
-    openai_api_key: str
-    embedding_model: str = "text-embedding-3-small"
-    chat_model: str = "gpt-4o-mini"
-    openai_timeout_seconds: float = 120.0
-    embedding_batch_size: int = 64
-    max_upload_bytes: int = 25 * 1024 * 1024
-    max_question_length: int = 4000
-    chroma_dir: str = "chroma_db"
-    collection_name: str = "doctrine_collection"
-    chunk_size: int = 900
-    chunk_overlap: int = 150
-    retrieval_pool_multiplier: int = 2
-    diversity_jaccard_threshold: float = 0.55
-    chat_temperature: float = 0.2
-    cors_origins: List[str] = field(default_factory=lambda: ["*"])
-    log_level: str = "INFO"
-    upload_dir: str = "uploads"
+# BGE-M3 (1024-dim). 모델을 바꾼 뒤에는 기존 Chroma 벡터 차원과 맞지 않으므로 /reset 또는 chroma_db 삭제 후 재인제스트 필요.
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
 
-    @staticmethod
-    def from_env() -> "Settings":
-        key = os.getenv("OPENAI_API_KEY", "").strip()
-        return Settings(
-            openai_api_key=key,
-            embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small").strip(),
-            chat_model=os.getenv("CHAT_MODEL", "gpt-4o-mini").strip(),
-            openai_timeout_seconds=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "120")),
-            embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "64")),
-            max_upload_bytes=int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024,
-            max_question_length=int(os.getenv("MAX_QUESTION_LENGTH", "4000")),
-            chroma_dir=os.getenv("CHROMA_DIR", "chroma_db").strip(),
-            collection_name=os.getenv("CHROMA_COLLECTION_NAME", "doctrine_collection").strip(),
-            chunk_size=int(os.getenv("CHUNK_SIZE", "900")),
-            chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
-            retrieval_pool_multiplier=max(1, int(os.getenv("RETRIEVAL_POOL_MULTIPLIER", "2"))),
-            diversity_jaccard_threshold=float(os.getenv("DIVERSITY_JACCARD_THRESHOLD", "0.55")),
-            chat_temperature=float(os.getenv("CHAT_TEMPERATURE", "0.2")),
-            cors_origins=_split_origins(os.getenv("CORS_ORIGINS", "*")),
-            log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
-            upload_dir=os.getenv("UPLOAD_DIR", "uploads").strip(),
-        )
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "900"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
+TOP_K_MAX = int(os.getenv("TOP_K_MAX", "20"))
 
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", "*").split(",")
+    if o.strip()
+] or ["*"]
 
-def validate_settings(settings: Settings) -> None:
-    """Import/기동 시점에 안전한 설정만 검사 (OpenAI 키는 제외 — Docker 헬스체크용)."""
-    if settings.chunk_size <= settings.chunk_overlap:
-        raise RuntimeError("CHUNK_SIZE는 CHUNK_OVERLAP보다 커야 합니다.")
-    if settings.max_upload_bytes <= 0:
-        raise RuntimeError("MAX_UPLOAD_MB는 양수여야 합니다.")
-
-
-def require_openai_api_key(settings: Settings) -> None:
-    """업로드·채팅 등 OpenAI 호출 직전에 호출."""
-    from exceptions import MissingOpenAIKeyError
-
-    if not settings.openai_api_key or settings.openai_api_key == "your_openai_api_key":
-        raise MissingOpenAIKeyError(
-            "OPENAI_API_KEY가 설정되지 않았습니다. 프로젝트 루트 .env에 실제 키를 넣은 뒤 컨테이너를 다시 시작하세요."
-        )
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

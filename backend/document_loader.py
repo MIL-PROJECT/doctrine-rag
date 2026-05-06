@@ -1,9 +1,11 @@
 import os
+from pathlib import Path
+
 from pypdf import PdfReader
 
 
 def load_document(file_path: str) -> str:
-    ext = os.path.splitext(file_path)[1].lower()
+    ext = Path(file_path).suffix.lower()
 
     if ext == ".txt":
         for encoding in ("utf-8-sig", "utf-8", "cp949"):
@@ -18,12 +20,21 @@ def load_document(file_path: str) -> str:
     if ext == ".pdf":
         reader = PdfReader(file_path)
         pages: list[str] = []
-
         for page_number, page in enumerate(reader.pages, start=1):
             text = page.extract_text()
             if text and text.strip():
                 pages.append(f"\n[PAGE {page_number}]\n{text}")
-
         return "\n".join(pages)
 
-    raise ValueError("PDF 또는 TXT 파일만 지원합니다.")
+    raise ValueError(f"Unsupported extension: {ext}")
+
+
+def list_doctrine_files(directory: str | os.PathLike[str]) -> list[Path]:
+    root = Path(directory)
+    if not root.is_dir():
+        return []
+    out: list[Path] = []
+    for p in sorted(root.iterdir()):
+        if p.is_file() and p.suffix.lower() in (".pdf", ".txt"):
+            out.append(p)
+    return out

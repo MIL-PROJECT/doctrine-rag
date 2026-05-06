@@ -1,38 +1,74 @@
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: doctrine-rag-ollama-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: doctrine-rag-ollama-ollama-init
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["sleep 8 && ollama pull qwen2.5:3b"]
+    restart: "no"
+
   backend:
     build:
       context: ./backend
-    container_name: doctrine-rag-backend
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
+    container_name: doctrine-rag-ollama-backend
+    command: >
+      sh -c "python ingest_seed.py &&
+             uvicorn main:app --host 0.0.0.0 --port 8000"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: qwen2.5:3b
+      HF_HOME: /app/.cache/huggingface
+      TRANSFORMERS_CACHE: /app/.cache/huggingface
+      CHROMA_DIR: chroma_db
+      DOCTRINE_DATA_DIR: data/doctrine
     env_file:
       - .env
     volumes:
-      - ./backend/uploads:/app/uploads
       - ./backend/chroma_db:/app/chroma_db
+      - ./backend/data:/app/data
+      - hf_cache:/app/.cache/huggingface
+    ports:
+      - "8000:8000"
+    depends_on:
+      ollama:
+        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
     healthcheck:
       test:
-        [
-          "CMD",
-          "curl",
-          "-fsS",
-          "http://127.0.0.1:8000/health/live",
-        ]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 40s
+        ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
 
   frontend:
     build:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_URL: http://localhost:8000
-    container_name: doctrine-rag-frontend
-    restart: unless-stopped
+    container_name: doctrine-rag-ollama-frontend
+    environment:
+      # 브라우저는 호스트의 8000, Next 서버(Route Handler)는 compose 네트워크의 backend
+      BACKEND_INTERNAL_URL: http://backend:8000
     ports:
       - "3000:3000"
     depends_on:
       backend:
         condition: service_healthy
+
+volumes:
+  ollama_data:
+  hf_cache:

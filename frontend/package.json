@@ -1,21 +1,28 @@
 {
-  "name": "doctrine-rag-frontend",
+  "name": "doctrine-rag-ollama-frontend",
   "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev -H 0.0.0.0",
+    "dev:local": "next dev",
+    "dev:network": "next dev -H 0.0.0.0 -p 3000",
     "build": "next build",
-    "start": "next start -H 0.0.0.0"
+    "start": "next start -H 0.0.0.0",
+    "start:network": "next start -H 0.0.0.0 -p 3000",
+    "lint": "next lint"
   },
   "dependencies": {
     "next": "14.2.5",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "styled-components": "^6.1.13"
   },
   "devDependencies": {
-    "typescript": "5.5.4",
     "@types/node": "20.14.10",
     "@types/react": "18.3.3",
-    "@types/react-dom": "18.3.0"
+    "@types/react-dom": "18.3.0",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.5",
+    "typescript": "5.5.4"
   }
 }
